@@ -8,18 +8,12 @@ You can also include images in this folder and reference them in the markdown. E
 -->
 
 ## How it works
-
-Explain how your project works
 The spi peripheral receives commands and data and stores them in some register values. These register values pass them as input to PWM peripheral which generates PWM signals. The PWNM signals are passed as output to be used for tiny tapeout
 
 ## How to test
-
-Explain how to use your project
 The project can be developed and tested using VS Code. Push changes to GitHub to have the CI system automatically run the Cocotb tests. Alternatively, the tests can be run locally using the appropriate development environment and Cocotb.
 
 ## External hardware
-
-List external hardware used in your project (e.g. PMOD, LED display, etc), if any
 No external hardware is required for testing the project. The design is simulated using Cocotb and the Tiny Tapeout environment.
 
 
