@@ -1,4 +1,4 @@
-```verilog
+
 /*
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -125,4 +125,4 @@ module tt_um_uwasic_onboarding_tise (
     };
 
 endmodule
-```
+
