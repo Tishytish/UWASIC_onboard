@@ -1,3 +1,4 @@
+```verilog
 /*
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -17,20 +18,9 @@ module tt_um_uwasic_onboarding_tise (
     input  wire       rst_n
 );
 
-    // ============================================================
-    // Register wires
-    // ============================================================
-
-    wire [7:0] en_reg_out_7_0;
-    wire [7:0] en_reg_out_15_8;
-
-    wire [7:0] en_reg_pwm_7_0;
-    wire [7:0] en_reg_pwm_15_8;
-
-    wire [7:0] pwm_duty_cycle;
 
     // ============================================================
-    // SPI pin mapping
+    // SPI PIN MAPPING
     //
     // ui_in[0] = SCLK
     // ui_in[1] = COPI
@@ -45,11 +35,26 @@ module tt_um_uwasic_onboarding_tise (
     assign spi_copi = ui_in[1];
     assign spi_ncs  = ui_in[2];
 
+
     // ============================================================
-    // SPI Peripheral
+    // REGISTER CONNECTIONS
+    // ============================================================
+
+    wire [7:0] en_reg_out_7_0;
+    wire [7:0] en_reg_out_15_8;
+
+    wire [7:0] en_reg_pwm_7_0;
+    wire [7:0] en_reg_pwm_15_8;
+
+    wire [7:0] pwm_duty_cycle;
+
+
+    // ============================================================
+    // SPI PERIPHERAL
     // ============================================================
 
     spi_peripheral spi_peripheral_inst (
+
         .clk(clk),
         .rst_n(rst_n),
 
@@ -59,18 +64,23 @@ module tt_um_uwasic_onboarding_tise (
 
         .en_reg_out_7_0(en_reg_out_7_0),
         .en_reg_out_15_8(en_reg_out_15_8),
+
         .en_reg_pwm_7_0(en_reg_pwm_7_0),
         .en_reg_pwm_15_8(en_reg_pwm_15_8),
+
         .pwm_duty_cycle(pwm_duty_cycle)
+
     );
 
+
     // ============================================================
-    // PWM Peripheral
+    // PWM PERIPHERAL
     // ============================================================
 
     wire [15:0] peripheral_out;
 
     pwm_peripheral pwm_peripheral_inst (
+
         .clk(clk),
         .rst_n(rst_n),
 
@@ -83,23 +93,31 @@ module tt_um_uwasic_onboarding_tise (
         .pwm_duty_cycle(pwm_duty_cycle),
 
         .out(peripheral_out)
+
     );
 
+
     // ============================================================
-    // Connect peripheral outputs to Tiny Tapeout pins
+    // OUTPUT CONNECTIONS
     //
-    // Lower 8 bits -> uo_out
-    // Upper 8 bits -> uio_out
+    // Lower 8 bits go to uo_out
+    // Upper 8 bits go to uio_out
     // ============================================================
 
     assign uo_out  = peripheral_out[7:0];
     assign uio_out = peripheral_out[15:8];
 
-    // uio pins are outputs
+    // All uio pins are configured as outputs
     assign uio_oe = 8'hFF;
 
-    // Mark unused inputs
-    wire _unused = &{
+
+    // ============================================================
+    // UNUSED SIGNALS
+    // ============================================================
+
+    wire _unused;
+
+    assign _unused = &{
         ena,
         ui_in[7:3],
         uio_in,
@@ -107,3 +125,4 @@ module tt_um_uwasic_onboarding_tise (
     };
 
 endmodule
+```
