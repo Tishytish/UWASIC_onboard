@@ -1,4 +1,4 @@
-```python
+
 # SPDX-FileCopyrightText: © 2024 Tiny Tapeout
 # SPDX-License-Identifier: Apache-2.0
 
@@ -584,4 +584,4 @@ async def test_pwm_duty(dut):
     dut._log.info("==============================")
     dut._log.info("PWM DUTY CYCLE TEST PASSED")
     dut._log.info("==============================")
-```
+
