@@ -1,4 +1,3 @@
-
 # SPDX-FileCopyrightText: © 2024 Tiny Tapeout
 # SPDX-License-Identifier: Apache-2.0
 
@@ -282,6 +281,22 @@ async def test_spi(dut):
     dut._log.info("==============================")
 
 
+async def wait_for_edge(dut, get_bit, rising=True, timeout_cycles=200000):
+    """Poll a bit once per clock instead of using RisingEdge/FallingEdge
+    directly on an indexed bit-select, which triggers an Icarus VPI bug
+    ('cannot callback values on type code=37')."""
+    prev = get_bit()
+    for _ in range(timeout_cycles):
+        await ClockCycles(dut.clk, 1)
+        cur = get_bit()
+        if rising and prev == 0 and cur == 1:
+            return
+        if not rising and prev == 1 and cur == 0:
+            return
+        prev = cur
+    raise TimeoutError("Expected edge on uo_out[0] never occurred")
+
+
 # ============================================================
 # SECTION 7 TEST — PWM FREQUENCY
 # ============================================================
@@ -349,7 +364,7 @@ async def test_pwm_freq(dut):
     # ========================================================
 
     # First rising edge
-    await RisingEdge(dut.uo_out[0])
+    await wait_for_edge(dut, lambda: int(dut.uo_out.value) & 1, rising=True)
 
     rising_time_1 = cocotb.utils.get_sim_time(
         units="ns"
@@ -357,7 +372,7 @@ async def test_pwm_freq(dut):
 
 
     # Second rising edge
-    await RisingEdge(dut.uo_out[0])
+    await wait_for_edge(dut, lambda: int(dut.uo_out.value) & 1, rising=True)
 
     rising_time_2 = cocotb.utils.get_sim_time(
         units="ns"
@@ -490,7 +505,7 @@ async def test_pwm_duty(dut):
 
 
     # Wait for beginning of PWM HIGH period
-    await RisingEdge(dut.uo_out[0])
+    await wait_for_edge(dut, lambda: int(dut.uo_out.value) & 1, rising=True)
 
     rising_time = cocotb.utils.get_sim_time(
         units="ns"
@@ -498,7 +513,7 @@ async def test_pwm_duty(dut):
 
 
     # Wait for PWM to go LOW
-    await FallingEdge(dut.uo_out[0])
+    await wait_for_edge(dut, lambda: int(dut.uo_out.value) & 1, rising=False)
 
     falling_time = cocotb.utils.get_sim_time(
         units="ns"
@@ -506,7 +521,7 @@ async def test_pwm_duty(dut):
 
 
     # Wait for next PWM cycle
-    await RisingEdge(dut.uo_out[0])
+    await wait_for_edge(dut, lambda: int(dut.uo_out.value) & 1, rising=True)
 
     next_rising_time = cocotb.utils.get_sim_time(
         units="ns"
@@ -584,4 +599,3 @@ async def test_pwm_duty(dut):
     dut._log.info("==============================")
     dut._log.info("PWM DUTY CYCLE TEST PASSED")
     dut._log.info("==============================")
-
