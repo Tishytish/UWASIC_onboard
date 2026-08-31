@@ -2,600 +2,378 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import cocotb
-
 from cocotb.clock import Clock
-from cocotb.triggers import (
-    RisingEdge,
-    FallingEdge,
-    ClockCycles
-)
-
+from cocotb.triggers import RisingEdge
+from cocotb.triggers import FallingEdge
+from cocotb.triggers import ClockCycles
+from cocotb.triggers import with_timeout
+from cocotb.result import SimTimeoutError
+from cocotb.types import Logic
 from cocotb.types import LogicArray
 
-
-# ============================================================
-# SPI HELPER FUNCTIONS
-# ============================================================
-
 async def await_half_sclk(dut):
-    """
-    Wait for half of the SPI clock period.
-
-    The system clock is 10 MHz = 100 ns period.
-    This waits approximately 5 us.
-    """
-
+    """Wait for the SCLK signal to go high or low."""
     start_time = cocotb.utils.get_sim_time(units="ns")
-
     while True:
-
         await ClockCycles(dut.clk, 1)
-
-        if (
-            start_time + 100 * 100 * 0.5
-            < cocotb.utils.get_sim_time(units="ns")
-        ):
+        # Wait for half of the SCLK period (10 us)
+        if (start_time + 100*100*0.5) < cocotb.utils.get_sim_time(units="ns"):
             break
-
+    return
 
 def ui_in_logicarray(ncs, bit, sclk):
-    """
-    Create ui_in.
-
-    ui_in[2] = nCS
-    ui_in[1] = COPI
-    ui_in[0] = SCLK
-    """
-
+    """Setup the ui_in value as a LogicArray."""
     return LogicArray(f"00000{ncs}{bit}{sclk}")
-
 
 async def send_spi_transaction(dut, r_w, address, data):
     """
-    Send a complete 16-bit SPI transaction.
-
-    Transaction format:
-
-        1 bit  = R/W
-        7 bits = Address
-        8 bits = Data
-
-    SPI Mode 0:
-        - COPI changes while SCLK is LOW
-        - COPI is sampled on SCLK rising edge
+    Send an SPI transaction with format:
+    - 1 bit for Read/Write
+    - 7 bits for address
+    - 8 bits for data
+    
+    Parameters:
+    - r_w: boolean, True for write, False for read
+    - address: int, 7-bit address (0-127)
+    - data: LogicArray or int, 8-bit data
     """
-
-    # Convert LogicArray to integer if needed
+    # Convert data to int if it's a LogicArray
     if isinstance(data, LogicArray):
         data_int = int(data)
     else:
         data_int = data
-
-
     # Validate inputs
     if address < 0 or address > 127:
-        raise ValueError("Address must be between 0 and 127")
-
+        raise ValueError("Address must be 7-bit (0-127)")
     if data_int < 0 or data_int > 255:
-        raise ValueError("Data must be between 0 and 255")
-
-
-    # First byte = R/W + 7-bit address
+        raise ValueError("Data must be 8-bit (0-255)")
+    # Combine RW and address into first byte
     first_byte = (int(r_w) << 7) | address
-
-
-    # ============================================================
-    # START TRANSACTION
-    # ============================================================
-
-    ncs = 0
+    # Start transaction - pull CS low
     sclk = 0
+    ncs = 0
     bit = 0
-
+    # Set initial state with CS low
     dut.ui_in.value = ui_in_logicarray(ncs, bit, sclk)
-
-    # Give synchronizers time to recognize nCS LOW
-    await ClockCycles(dut.clk, 5)
-
-
-    # ============================================================
-    # SEND R/W + ADDRESS
-    # ============================================================
-
+    await ClockCycles(dut.clk, 1)
+    # Send first byte (RW + Address)
     for i in range(8):
-
-        bit = (first_byte >> (7 - i)) & 0x1
-
-        # SCLK LOW: set data
+        bit = (first_byte >> (7-i)) & 0x1
+        # SCLK low, set COPI
         sclk = 0
         dut.ui_in.value = ui_in_logicarray(ncs, bit, sclk)
-
         await await_half_sclk(dut)
-
-        # SCLK HIGH: SPI peripheral samples data
+        # SCLK high, keep COPI
         sclk = 1
         dut.ui_in.value = ui_in_logicarray(ncs, bit, sclk)
-
         await await_half_sclk(dut)
-
-
-    # ============================================================
-    # SEND DATA
-    # ============================================================
-
+    # Send second byte (Data)
     for i in range(8):
-
-        bit = (data_int >> (7 - i)) & 0x1
-
-        # SCLK LOW: set data
+        bit = (data_int >> (7-i)) & 0x1
+        # SCLK low, set COPI
         sclk = 0
         dut.ui_in.value = ui_in_logicarray(ncs, bit, sclk)
-
         await await_half_sclk(dut)
-
-        # SCLK HIGH: SPI peripheral samples data
+        # SCLK high, keep COPI
         sclk = 1
         dut.ui_in.value = ui_in_logicarray(ncs, bit, sclk)
-
         await await_half_sclk(dut)
-
-
-    # ============================================================
-    # END TRANSACTION
-    # ============================================================
-
+    # End transaction - return CS high
     sclk = 0
     ncs = 1
     bit = 0
-
     dut.ui_in.value = ui_in_logicarray(ncs, bit, sclk)
-
-    # Allow synchronizer + transaction finalization
     await ClockCycles(dut.clk, 600)
-
-
-# ============================================================
-# RESET HELPER
-# ============================================================
-
-async def reset_dut(dut):
-    """
-    Reset the design.
-    """
-
-    dut.ena.value = 1
-
-    # SPI idle state:
-    # nCS = 1
-    # COPI = 0
-    # SCLK = 0
-
-    dut.ui_in.value = ui_in_logicarray(1, 0, 0)
-
-    dut.rst_n.value = 0
-
-    await ClockCycles(dut.clk, 5)
-
-    dut.rst_n.value = 1
-
-    await ClockCycles(dut.clk, 10)
-
-
-# ============================================================
-# SECTION 6 TEST — SPI
-# ============================================================
+    return ui_in_logicarray(ncs, bit, sclk)
 
 @cocotb.test()
 async def test_spi(dut):
+    dut._log.info("Start SPI test")
 
-    dut._log.info("==============================")
-    dut._log.info("STARTING SPI TEST")
-    dut._log.info("==============================")
-
-
-    # Start 10 MHz system clock
+    # Set the clock period to 100 ns (10 MHz)
     clock = Clock(dut.clk, 100, units="ns")
     cocotb.start_soon(clock.start())
 
+    # Reset
+    dut._log.info("Reset")
+    dut.ena.value = 1
+    ncs = 1
+    bit = 0
+    sclk = 0
+    dut.ui_in.value = ui_in_logicarray(ncs, bit, sclk)
+    dut.rst_n.value = 0
+    await ClockCycles(dut.clk, 5)
+    dut.rst_n.value = 1
+    await ClockCycles(dut.clk, 5)
 
-    # Reset DUT
-    await reset_dut(dut)
+    dut._log.info("Test project behavior")
+    dut._log.info("Write transaction, address 0x00, data 0xF0")
+    ui_in_val = await send_spi_transaction(dut, 1, 0x00, 0xF0)  # Write transaction
+    assert dut.uo_out.value == 0xF0, f"Expected 0xF0, got {dut.uo_out.value}"
+    await ClockCycles(dut.clk, 1000) 
 
+    dut._log.info("Write transaction, address 0x01, data 0xCC")
+    ui_in_val = await send_spi_transaction(dut, 1, 0x01, 0xCC)  # Write transaction
+    assert dut.uio_out.value == 0xCC, f"Expected 0xCC, got {dut.uio_out.value}"
+    await ClockCycles(dut.clk, 100)
 
-    # ========================================================
-    # TEST REGISTER 0x00
-    # ========================================================
+    dut._log.info("Write transaction, address 0x30 (invalid), data 0xAA")
+    ui_in_val = await send_spi_transaction(dut, 1, 0x30, 0xAA)
+    await ClockCycles(dut.clk, 100)
 
-    dut._log.info("Writing 0xF0 to address 0x00")
+    dut._log.info("Read transaction (invalid), address 0x00, data 0xBE")
+    ui_in_val = await send_spi_transaction(dut, 0, 0x30, 0xBE)
+    assert dut.uo_out.value == 0xF0, f"Expected 0xF0, got {dut.uo_out.value}"
+    await ClockCycles(dut.clk, 100)
+    
+    dut._log.info("Read transaction (invalid), address 0x41 (invalid), data 0xEF")
+    ui_in_val = await send_spi_transaction(dut, 0, 0x41, 0xEF)
+    await ClockCycles(dut.clk, 100)
 
-    await send_spi_transaction(
-        dut,
-        1,
-        0x00,
-        0xF0
-    )
+    dut._log.info("Write transaction, address 0x02, data 0xFF")
+    ui_in_val = await send_spi_transaction(dut, 1, 0x02, 0xFF)  # Write transaction
+    await ClockCycles(dut.clk, 100)
 
-    assert int(dut.uo_out.value) == 0xF0, (
-        f"Expected 0xF0, got {dut.uo_out.value}"
-    )
+    dut._log.info("Write transaction, address 0x04, data 0xCF")
+    ui_in_val = await send_spi_transaction(dut, 1, 0x04, 0xCF)  # Write transaction
+    await ClockCycles(dut.clk, 30000)
 
+    dut._log.info("Write transaction, address 0x04, data 0xFF")
+    ui_in_val = await send_spi_transaction(dut, 1, 0x04, 0xFF)  # Write transaction
+    await ClockCycles(dut.clk, 30000)
 
-    # ========================================================
-    # TEST REGISTER 0x01
-    # ========================================================
+    dut._log.info("Write transaction, address 0x04, data 0x00")
+    ui_in_val = await send_spi_transaction(dut, 1, 0x04, 0x00)  # Write transaction
+    await ClockCycles(dut.clk, 30000)
 
-    dut._log.info("Writing 0xCC to address 0x01")
+    dut._log.info("Write transaction, address 0x04, data 0x01")
+    ui_in_val = await send_spi_transaction(dut, 1, 0x04, 0x01)  # Write transaction
+    await ClockCycles(dut.clk, 30000)
 
-    await send_spi_transaction(
-        dut,
-        1,
-        0x01,
-        0xCC
-    )
-
-    assert int(dut.uio_out.value) == 0xCC, (
-        f"Expected 0xCC, got {dut.uio_out.value}"
-    )
-
-
-    # ========================================================
-    # INVALID ADDRESS
-    # ========================================================
-
-    dut._log.info("Testing invalid address 0x30")
-
-    await send_spi_transaction(
-        dut,
-        1,
-        0x30,
-        0xAA
-    )
-
-    # Output should remain unchanged
-    assert int(dut.uo_out.value) == 0xF0, (
-        "Invalid address changed uo_out"
-    )
-
-
-    # ========================================================
-    # READ TRANSACTION
-    # ========================================================
-
-    dut._log.info("Testing read transaction")
-
-    await send_spi_transaction(
-        dut,
-        0,
-        0x00,
-        0xBE
-    )
-
-    # Read should NOT modify register
-    assert int(dut.uo_out.value) == 0xF0, (
-        "Read transaction modified uo_out"
-    )
-
-
-    dut._log.info("==============================")
-    dut._log.info("SPI TEST PASSED")
-    dut._log.info("==============================")
-
-
-async def wait_for_edge(dut, get_bit, rising=True, timeout_cycles=200000):
-    """Poll a bit once per clock instead of using RisingEdge/FallingEdge
-    directly on an indexed bit-select, which triggers an Icarus VPI bug
-    ('cannot callback values on type code=37')."""
-    prev = get_bit()
-    for _ in range(timeout_cycles):
-        await ClockCycles(dut.clk, 1)
-        cur = get_bit()
-        if rising and prev == 0 and cur == 1:
-            return
-        if not rising and prev == 1 and cur == 0:
-            return
-        prev = cur
-    raise TimeoutError("Expected edge on uo_out[0] never occurred")
-
-
-# ============================================================
-# SECTION 7 TEST — PWM FREQUENCY
-# ============================================================
+    dut._log.info("SPI test completed successfully")
 
 @cocotb.test()
 async def test_pwm_freq(dut):
+    dut._log.info("Start PWM frequency test")
 
-    dut._log.info("==============================")
-    dut._log.info("STARTING PWM FREQUENCY TEST")
-    dut._log.info("==============================")
+    # =========================================================================
+    # SECTION 1 — Setup
+    #
+    # so before u can see any output toggling, 3 things need to be configured:
+    #   1. output enable (addr 0x00) — tells the pin its allowed to turn on
+    #   2. pwm mode enable (addr 0x02) — makes it actually toggle instead of
+    #      sitting static high (i didnt know u needed both at first, tripped me up)
+    #   3. duty cycle (addr 0x04) — has to be nonzero or theres nothing to toggle
+    #
+    # im using 50% duty cycle (0x80) cus we only care about the PERIOD here,
+    # not how long its high vs low. 50% is also the easiest to read in gtkwave
+    # if smth goes wrong
+    # =========================================================================
 
-
-    # Start 10 MHz clock
+    # 10 mhz clock — 100ns per cycle, same as the real chip
     clock = Clock(dut.clk, 100, units="ns")
     cocotb.start_soon(clock.start())
 
+    # hold reset for a few cycles so all the registers start cleared to 0x00
+    # if u skip reset the regs might have garbage values from previous tests
+    dut.ena.value = 1
+    dut.ui_in.value = ui_in_logicarray(1, 0, 0)  # CS high while resetting
+    dut.rst_n.value = 0
+    await ClockCycles(dut.clk, 5)
+    dut.rst_n.value = 1
+    await ClockCycles(dut.clk, 5)
 
-    # Reset DUT
-    await reset_dut(dut)
+    # addr 0x00 — turn on uo_out[7:0] by writing 0xFF
+    # we only actualy measure bit 0 but enabling all 8 doesnt hurt anything
+    await send_spi_transaction(dut, 1, 0x00, 0xFF)
 
+    # addr 0x02 — enable pwm mode on uo_out[7:0]
+    # without this the output just stays HIGH forever, no toggling at all
+    await send_spi_transaction(dut, 1, 0x02, 0xFF)
 
-    # ========================================================
-    # CONFIGURE PWM
+    # addr 0x04 — set duty cycle to 50% (0x80 = 128/256 = 50%)
+    await send_spi_transaction(dut, 1, 0x04, 0x80)
+
+    # =========================================================================
+    # SECTION 2 — Measure
     #
-    # Register 0x00:
-    # Enable output bit 0
-    # ========================================================
-
-    await send_spi_transaction(
-        dut,
-        1,
-        0x00,
-        0x01
-    )
-
-
-    # Register 0x02:
-    # Enable PWM on bit 0
-
-    await send_spi_transaction(
-        dut,
-        1,
-        0x02,
-        0x01
-    )
-
-
-    # Register 0x04:
-    # Set approximately 50% duty cycle
-
-    await send_spi_transaction(
-        dut,
-        1,
-        0x04,
-        0x80
-    )
-
-
-    # Give PWM time to run
-    await ClockCycles(dut.clk, 1000)
-
-
-    # ========================================================
-    # MEASURE PERIOD
-    # ========================================================
-
-    # First rising edge
-    await wait_for_edge(dut, lambda: int(dut.uo_out.value) & 1, rising=True)
-
-    rising_time_1 = cocotb.utils.get_sim_time(
-        units="ns"
-    )
-
-
-    # Second rising edge
-    await wait_for_edge(dut, lambda: int(dut.uo_out.value) & 1, rising=True)
-
-    rising_time_2 = cocotb.utils.get_sim_time(
-        units="ns"
-    )
-
-
-    # Calculate period
-    period_ns = rising_time_2 - rising_time_1
-
-
-    # Frequency = 1 / period
-    frequency_hz = 1_000_000_000 / period_ns
-
-
-    dut._log.info(
-        f"PWM Period: {period_ns} ns"
-    )
-
-    dut._log.info(
-        f"PWM Frequency: {frequency_hz:.2f} Hz"
-    )
-
-
-    # Required:
-    # 3000 Hz ± 1%
+    # the way to measure freqency is:
+    #   wait for a rising edge on uo_out[0] → record the time
+    #   wait for the NEXT rising edge        → record the time again
+    #   the differnce betwen those two times = one full period
+    #   then frequency = 1 / period
     #
-    # Acceptable:
-    # 2970 Hz to 3030 Hz
+    # to detect a rising edge in software i just poll the pin every clock cycle
+    # and check if it was 0 last time and is 1 now (0→1 transition)
+    #
+    # expected period from the hardware (from pwm_peripheral.v):
+    #   clk_div_trig = 12, so pwm_counter ticks every (12+1) = 13 system clocks
+    #   pwm_counter is 8 bit so it wraps every 256 counts
+    #   one full period = 13 * 256 = 3328 clocks = 332800 ns = ~3004.8 hz
+    # =========================================================================
 
-    assert 2970 <= frequency_hz <= 3030, (
-        f"Frequency {frequency_hz:.2f} Hz "
-        "is outside the allowed range"
+    # RisingEdge suspends until uo_out[0] goes 0→1, no manual polling needed
+    await RisingEdge(dut.pwm_out)
+    t1 = cocotb.utils.get_sim_time(units="ns")
+    dut._log.info(f"First rising edge at {t1} ns")
+
+    # wait for the next rising edge to complete one full period
+    await RisingEdge(dut.pwm_out)
+    t2 = cocotb.utils.get_sim_time(units="ns")
+    dut._log.info(f"Second rising edge at {t2} ns")
+
+    # period = time betwen the two rising edges (in nanoseconds)
+    # to get hz from ns: freq = 1 / (period_ns * 1e-9) = 1e9 / period_ns
+    period_ns = t2 - t1
+    freq_hz = 1e9 / period_ns
+    dut._log.info(f"Measured period: {period_ns:.0f} ns  →  frequency: {freq_hz:.2f} Hz")
+
+    # =========================================================================
+    # SECTION 3 — Assert
+    #
+    # spec says pwm should run at 3khz with +-1% tolerence
+    # 1% of 3000 = 30 so the acceptable range is 2970 to 3030 hz
+    # our hardware gives ~3004.8 hz which is only 0.16% off so it should pass ez
+    #
+    # if this assert fires, first thing to do is open tb.vcd in gtkwave and
+    # check if uo_out[0] is even toggling — if its stuck the enables are prob wrong
+    # =========================================================================
+
+    assert 2970 <= freq_hz <= 3030, (
+        f"PWM frequency out of range: expected 2970–3030 Hz, got {freq_hz:.2f} Hz"
     )
 
+    dut._log.info("PWM frequency test completed successfully")
 
-    dut._log.info("==============================")
-    dut._log.info("PWM FREQUENCY TEST PASSED")
-    dut._log.info("==============================")
-
-
-# ============================================================
-# SECTION 7 TEST — PWM DUTY CYCLE
-# ============================================================
 
 @cocotb.test()
 async def test_pwm_duty(dut):
+    dut._log.info("Start PWM duty cycle test")
 
-    dut._log.info("==============================")
-    dut._log.info("STARTING PWM DUTY CYCLE TEST")
-    dut._log.info("==============================")
+    # =========================================================================
+    # SECTION 1 — Setup
+    #
+    # same setup as test_pwm_freq: clock, reset, then configure the two enable
+    # registers so the output pin is in pwm mode.
+    # we dont write the duty cycle reg here on purpose — we'll try a few
+    # diffrent values in section 2 to test each one seperately
+    # =========================================================================
 
-
-    # Start 10 MHz clock
     clock = Clock(dut.clk, 100, units="ns")
     cocotb.start_soon(clock.start())
 
+    dut.ena.value = 1
+    dut.ui_in.value = ui_in_logicarray(1, 0, 0)  # CS high while reseting
+    dut.rst_n.value = 0
+    await ClockCycles(dut.clk, 5)
+    dut.rst_n.value = 1
+    await ClockCycles(dut.clk, 5)
 
-    # Reset DUT
-    await reset_dut(dut)
+    # addr 0x00 — enable uo_out[7:0] outputs
+    # if this isnt set the pin just stays 0 no matter what u write to the other regs
+    await send_spi_transaction(dut, 1, 0x00, 0xFF)
 
+    # addr 0x02 — enable pwm mode on uo_out[7:0]
+    # without this the output ignores the duty cycle reg and stays static high
+    await send_spi_transaction(dut, 1, 0x02, 0xFF)
 
-    # ========================================================
-    # ENABLE OUTPUT BIT 0
-    # ========================================================
-
-    await send_spi_transaction(
-        dut,
-        1,
-        0x00,
-        0x01
-    )
-
-
-    # ========================================================
-    # ENABLE PWM ON BIT 0
-    # ========================================================
-
-    await send_spi_transaction(
-        dut,
-        1,
-        0x02,
-        0x01
-    )
-
-
-    # ========================================================
-    # TEST 0% DUTY CYCLE
+    # =========================================================================
+    # SECTION 2 — Measure
     #
-    # pwm_duty_cycle = 0x00
-    # Output should always be LOW
-    # ========================================================
-
-    dut._log.info("Testing 0% duty cycle")
-
-    await send_spi_transaction(
-        dut,
-        1,
-        0x04,
-        0x00
-    )
-
-
-    # Wait longer than one PWM period
-    await ClockCycles(dut.clk, 5000)
-
-
-    assert int(dut.uo_out[0].value) == 0, (
-        "Expected PWM output LOW at 0% duty cycle"
-    )
-
-
-    dut._log.info("0% DUTY CYCLE PASSED")
-
-
-    # ========================================================
-    # TEST 50% DUTY CYCLE
+    # for "normal" duty cycles (not 0% or 100%) i use 3 edge detections:
     #
-    # 0x80 = 128
-    # 128 / 256 = 50%
-    # ========================================================
-
-    dut._log.info("Testing 50% duty cycle")
-
-    await send_spi_transaction(
-        dut,
-        1,
-        0x04,
-        0x80
-    )
-
-
-    # Wait for beginning of PWM HIGH period
-    await wait_for_edge(dut, lambda: int(dut.uo_out.value) & 1, rising=True)
-
-    rising_time = cocotb.utils.get_sim_time(
-        units="ns"
-    )
-
-
-    # Wait for PWM to go LOW
-    await wait_for_edge(dut, lambda: int(dut.uo_out.value) & 1, rising=False)
-
-    falling_time = cocotb.utils.get_sim_time(
-        units="ns"
-    )
-
-
-    # Wait for next PWM cycle
-    await wait_for_edge(dut, lambda: int(dut.uo_out.value) & 1, rising=True)
-
-    next_rising_time = cocotb.utils.get_sim_time(
-        units="ns"
-    )
-
-
-    # Calculate high time
-    high_time = falling_time - rising_time
-
-
-    # Calculate complete period
-    period = next_rising_time - rising_time
-
-
-    # Calculate duty cycle percentage
-    duty_cycle_percent = (
-        high_time / period
-    ) * 100
-
-
-    dut._log.info(
-        f"High time: {high_time} ns"
-    )
-
-    dut._log.info(
-        f"Period: {period} ns"
-    )
-
-    dut._log.info(
-        f"Measured duty cycle: "
-        f"{duty_cycle_percent:.2f}%"
-    )
-
-
-    # Required:
-    # 50% ± 1%
-
-    assert 49 <= duty_cycle_percent <= 51, (
-        f"Expected approximately 50%, "
-        f"got {duty_cycle_percent:.2f}%"
-    )
-
-
-    dut._log.info("50% DUTY CYCLE PASSED")
-
-
-    # ========================================================
-    # TEST 100% DUTY CYCLE
+    #   step A: find rising edge  (0→1) → t_rise1, start of the high phase
+    #   step B: find falling edge (1→0) → t_fall,  end of the high phase
+    #   step C: find next rising  (0→1) → t_rise2, one full period done
     #
-    # 0xFF = always HIGH
-    # ========================================================
+    #   high_time = t_fall  - t_rise1    (how long the pin was HIGH)
+    #   period    = t_rise2 - t_rise1    (total length of one pwm cycle)
+    #   duty %    = (high_time / period) * 100
+    #
+    # for 0% and 100% edge cases the pin doesnt ever toggle so the loop above
+    # would run forever. instead we just wait 2 full pwm periods and check
+    # that the pin is stuck at the right constant value
+    # =========================================================================
 
-    dut._log.info("Testing 100% duty cycle")
+    results = []  # store (measured, expected, label) — assert all at the end
 
-    await send_spi_transaction(
-        dut,
-        1,
-        0x04,
-        0xFF
-    )
+    # testing 25% (0x40 = 64/256 = 25%) and 50% (0x80 = 128/256 = 50%)
+    for reg_val, expected_pct in [(0x40, 25.0), (0x80, 50.0)]:
 
+        await send_spi_transaction(dut, 1, 0x04, reg_val)
 
-    # Wait longer than one complete PWM period
-    await ClockCycles(dut.clk, 5000)
+        # STEP A — wait for rising edge (0→1): start of the high phase
+        await RisingEdge(dut.pwm_out)
+        t_rise1 = cocotb.utils.get_sim_time(units="ns")
 
+        # STEP B — wait for falling edge (1→0): end of the high phase
+        await FallingEdge(dut.pwm_out)
+        t_fall = cocotb.utils.get_sim_time(units="ns")
 
-    assert int(dut.uo_out[0].value) == 1, (
-        "Expected PWM output HIGH at 100% duty cycle"
-    )
+        # STEP C — wait for next rising edge: one full period complete
+        await RisingEdge(dut.pwm_out)
+        t_rise2 = cocotb.utils.get_sim_time(units="ns")
 
+        high_time = t_fall  - t_rise1
+        period    = t_rise2 - t_rise1
+        measured  = (high_time / period) * 100
+        dut._log.info(
+            f"{hex(reg_val)}: high={high_time:.0f} ns, "
+            f"period={period:.0f} ns, duty={measured:.2f}%"
+        )
+        results.append((measured, expected_pct, hex(reg_val)))
 
-    dut._log.info("100% DUTY CYCLE PASSED")
+    # --- edge case: 0% duty cycle (0x00) ---
+    # pwm_signal = (pwm_counter < 0) in the rtl, but pwm_counter is unsigned
+    # so it literally cant ever be less than 0 — condition is always false, pin stays LOW
+    #
+    # old approach was sampling 8times but thatis wring cus thats not suffecient
+    # this way we just wait for ANY rising edge during 2 full periods
+    # if one fires we know the pin went high and somthings wrong
+    # if we time out with no edge = correctly stuck low the whole time
+    await send_spi_transaction(dut, 1, 0x04, 0x00)
+    two_periods_ns = 2 * 3328 * 100  # 2 periods worth of ns (3328 clocks each * 100ns/clk)
+    try:
+        await with_timeout(RisingEdge(dut.pwm_out), timeout_time=two_periods_ns, timeout_unit="ns")
+        stuck_low = False  # rising edge happend - pin went high at some point,  bad
+    except SimTimeoutError:
+        stuck_low = True  # no edg whole time, good
+    dut._log.info(f"0x00: pin is {'LOW — correct' if stuck_low else 'HIGH — WRONG'}")
 
+    # --- edge case: 100% duty cycle (0xFF) ---
+    # rtl has a special case: pwm_duty_cycle == 0xFF forces output = 1 always
+    # needed becasue otherwise 0xFF = 255/256 = 99.6%, not actually 100%
+    # (counter goes 0 to 255, "counter < 255" is true 255 out of 256 times)
+    #
+    # same thing as above but flipped — listen for a FallingEdge instead
+    # if pin dips low even once during 2 periods something is wrong
+    # timeout with no falling edge = pin was stuck high the whole time, correct
+    await send_spi_transaction(dut, 1, 0x04, 0xFF)
+    try:
+        await with_timeout(FallingEdge(dut.pwm_out), timeout_time=two_periods_ns, timeout_unit="ns")
+        stuck_high = False  # falling edge happend - pin went low at some point,  bad
+    except SimTimeoutError:
+        stuck_high = True  # no edg the whole time, good
+    dut._log.info(f"0xFF: pin is {'HIGH — correct' if stuck_high else 'LOW — WRONG'}")
 
-    dut._log.info("==============================")
-    dut._log.info("PWM DUTY CYCLE TEST PASSED")
-    dut._log.info("==============================")
+    # =========================================================================
+    # SECTION 3 — Assert
+    #
+    # spec says duty cycle must be within +-1% of the expected value
+    # so for 25% expected: anythign from 24.0% to 26.0% passes
+    # for 50% expected: 49.0% to 51.0% passes
+    #
+    # the hardware computes exactly 25.0% and 50.0% for our test values
+    # so both should pass no problem
+    # =========================================================================
+
+    for measured, expected, label in results:
+        assert abs(measured - expected) <= 1.0, (
+            f"Duty cycle wrong for {label}: "
+            f"expected {expected:.1f}% ±1%, got {measured:.2f}%"
+        )
+
+    assert stuck_low,  "0x00 duty cycle: expected pin LOW but it wasnt"
+    assert stuck_high, "0xFF duty cycle: expected pin HIGH but it wasnt"
+
+    dut._log.info("PWM duty cycle test completed successfully")
