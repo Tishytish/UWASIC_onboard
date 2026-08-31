@@ -302,6 +302,8 @@ async def test_pwm_duty(dut):
 
         await send_spi_transaction(dut, 1, 0x04, reg_val)
 
+        await RisingEdge(dut.pwm_out)
+
         # STEP A — wait for rising edge (0→1): start of the high phase
         await RisingEdge(dut.pwm_out)
         t_rise1 = cocotb.utils.get_sim_time(units="ns")

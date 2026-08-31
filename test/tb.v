@@ -24,9 +24,9 @@ module tb ();
   wire [7:0] uio_oe;
 `ifdef GL_TEST
   wire VPWR = 1'b1;
-  wire VGND = 1'b0;
-  wire pwm_out = uo_out[0]; 
+  wire VGND = 1'b0; 
 `endif
+  wire pwm_out = uo_out[0];
 
   // Replace tt_um_example with your module name:
   tt_um_uwasic_onboarding_tise user_project (
